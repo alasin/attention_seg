@@ -27,6 +27,9 @@ from torch.autograd import Variable
 import drn
 import data_transforms as transforms
 
+from tensorboardX import SummaryWriter
+import torchvision.utils as vutils
+
 try:
     from modules import batchnormsync
 except ImportError:
@@ -37,6 +40,7 @@ logging.basicConfig(format=FORMAT)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+writer = SummaryWriter('logs/34')
 
 CITYSCAPE_PALETTE = np.asarray([
     [128, 64, 128],
@@ -190,10 +194,12 @@ class SegListMS(torch.utils.data.Dataset):
             assert len(self.image_list) == len(self.label_list)
 
 
-def validate(val_loader, model, criterion, eval_score=None, print_freq=10):
+def validate(val_loader, model, criterion, eval_score=None, print_freq=10, epoch=-1, num_classes=19):
     batch_time = AverageMeter()
     losses = AverageMeter()
     score = AverageMeter()
+
+    hist = np.zeros((num_classes, num_classes))
 
     # switch to evaluate mode
     model.eval()
@@ -212,6 +218,9 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=10):
         output = model(input_var)[0]
         loss = criterion(output, target_var)
 
+        _, pred = torch.max(output, 1)
+        pred = pred.cpu().data.numpy()
+
         # measure accuracy and record loss
         # prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
         losses.update(loss.data[0], input.size(0))
@@ -222,6 +231,9 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=10):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        label = target.cpu().numpy()
+        hist += fast_hist(pred.flatten(), label.flatten(), num_classes)
+
         if i % print_freq == 0:
             logger.info('Test: [{0}/{1}]\t'
                         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -230,7 +242,18 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=10):
                 i, len(val_loader), batch_time=batch_time, loss=losses,
                 score=score))
 
+    ious = per_class_iu(hist) * 100
+    mAP = round(np.nanmean(ious), 2)
     logger.info(' * Score {top1.avg:.3f}'.format(top1=score))
+    logger.info(' '.join('{:.03f}'.format(i) for i in ious))
+    logger.info('mAP: %f', mAP)
+    
+    writer.add_scalar('val/loss', loss.data[0], epoch)
+    writer.add_scalar('val/accuracy', score.avg, epoch)
+    writer.add_scalar('val/mAP', mAP, epoch)
+    # writer.add_image('val/gt', target_var, epoch)
+    # writer.add_image('val/pred', output, epoch)
+    # writer.add_image('val/input', input, epoch)
 
     return score.avg
 
@@ -310,6 +333,11 @@ def train(train_loader, model, criterion, optimizer, epoch,
         batch_time.update(time.time() - end)
         end = time.time()
 
+        iteration = epoch * len(train_loader) + i
+
+        # gt_arr = vutils.make_grid(target_var.data, normalize=True, scale_each=True)
+        # pred_arr = vutils.make_grid(output.data, normalize=True, scale_each=True)
+        # input_arr = vutils.make_grid(input.data, normalize=True, scale_each=True)
         if i % print_freq == 0:
             logger.info('Epoch: [{0}][{1}/{2}]\t'
                         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -318,6 +346,12 @@ def train(train_loader, model, criterion, optimizer, epoch,
                         'Score {top1.val:.3f} ({top1.avg:.3f})'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=scores))
+            
+            writer.add_scalar('train/loss', loss.data[0], iteration)
+            writer.add_scalar('train/accuracy', scores.val, iteration)
+            # writer.add_image('train/gt', gt_arr, iteration)
+            # writer.add_image('train/pred', pred_arr, iteration)
+            # writer.add_image('train/input', input_arr, iteration)
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -362,16 +396,25 @@ def train_seg(args):
     train_loader = torch.utils.data.DataLoader(
         SegList(data_dir, 'train', transforms.Compose(t)),
         batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True
+        pin_memory=False, drop_last=True
     )
+    # val_loader = torch.utils.data.DataLoader(
+    #     SegList(data_dir, 'val', transforms.Compose([
+    #         transforms.RandomCrop(crop_size),
+    #         transforms.ToTensor(),
+    #         normalize,
+    #     ])),
+    #     batch_size=1, shuffle=False, num_workers=num_workers,
+    #     pin_memory=True, drop_last=False
+    # )
+
     val_loader = torch.utils.data.DataLoader(
         SegList(data_dir, 'val', transforms.Compose([
-            transforms.RandomCrop(crop_size),
             transforms.ToTensor(),
             normalize,
         ])),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True, drop_last=True
+        batch_size=1, shuffle=False, num_workers=num_workers,
+        pin_memory=False, drop_last=False
     )
 
     # define loss function (criterion) and pptimizer
@@ -398,7 +441,7 @@ def train_seg(args):
             print("=> no checkpoint found at '{}'".format(args.resume))
 
     if args.evaluate:
-        validate(val_loader, model, criterion, eval_score=accuracy)
+        validate(val_loader, model, criterion, eval_score=accuracy, epoch=-1)
         return
 
     for epoch in range(start_epoch, args.epochs):
@@ -409,7 +452,7 @@ def train_seg(args):
               eval_score=accuracy)
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion, eval_score=accuracy)
+        prec1 = validate(val_loader, model, criterion, eval_score=accuracy, epoch=epoch)
 
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
@@ -439,7 +482,7 @@ def adjust_learning_rate(args, optimizer, epoch):
     return lr
 
 
-def fast_hist(pred, label, n):
+def fast_hist(pred, label, n=19):
     k = (label >= 0) & (label < n)
     return np.bincount(
         n * label[k].astype(int) + pred[k], minlength=n ** 2).reshape(n, n)
@@ -599,6 +642,61 @@ def test_ms(eval_data_loader, model, num_classes, scales,
         return round(np.nanmean(ious), 2)
 
 
+def summary(input_size, model):
+    def register_hook(module):
+        def hook(module, input, output):
+            class_name = str(module.__class__).split('.')[-1].split("'")[0]
+            module_idx = len(summary)
+
+            m_key = '%s-%i' % (class_name, module_idx+1)
+            summary[m_key] = OrderedDict()
+            summary[m_key]['input_shape'] = list(input[0].size())
+            summary[m_key]['input_shape'][0] = -1
+            summary[m_key]['output_shape'] = list(output.size())
+            summary[m_key]['output_shape'][0] = -1
+
+            params = 0
+            if hasattr(module, 'weight'):
+                params += th.prod(th.LongTensor(list(module.weight.size())))
+                if module.weight.requires_grad:
+                    summary[m_key]['trainable'] = True
+                else:
+                    summary[m_key]['trainable'] = False
+            if hasattr(module, 'bias'):
+                params +=  th.prod(th.LongTensor(list(module.bias.size())))
+            summary[m_key]['nb_params'] = params
+            
+        if not isinstance(module, nn.Sequential) and \
+            not isinstance(module, nn.ModuleList) and \
+            not (module == model):
+            hooks.append(module.register_forward_hook(hook))
+    
+    # check if there are multiple inputs to the network
+    if isinstance(input_size[0], (list, tuple)):
+        x = [Variable(th.rand(1,*in_size)) for in_size in input_size]
+    else:
+        x = Variable(th.rand(1,*input_size))
+
+    # create properties
+    summary = OrderedDict()
+    hooks = []
+    # register hook
+    model.apply(register_hook)
+    # make a forward pass
+    model(x)
+    # remove these hooks
+    for h in hooks:
+        h.remove()
+
+    return summary
+
+
+def summarize_seg(args):
+    input_size = (args.crop_size, args.crop_size, 3)
+    model = DRNSeg(args.arch, args.classes, pretrained_model=None, pretrained=False)
+    summary(input_size, model)
+
+
 def test_seg(args):
     batch_size = args.batch_size
     num_workers = args.workers
@@ -661,7 +759,7 @@ def test_seg(args):
                       output_dir=out_dir,
                       scales=scales)
     else:
-        mAP = test(test_loader, model, args.classes, save_vis=True,
+        mAP = test(test_loader, model, args.classes, save_vis=False,
                    has_gt=phase != 'test' or args.with_gt, output_dir=out_dir)
     logger.info('mAP: %f', mAP)
 
@@ -669,7 +767,7 @@ def test_seg(args):
 def parse_args():
     # Training settings
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('cmd', choices=['train', 'test'])
+    parser.add_argument('cmd', choices=['train', 'test', 'summarize'])
     parser.add_argument('-d', '--data-dir', default=None)
     parser.add_argument('-c', '--classes', default=0, type=int)
     parser.add_argument('-s', '--crop-size', default=0, type=int)
@@ -724,6 +822,8 @@ def main():
         train_seg(args)
     elif args.cmd == 'test':
         test_seg(args)
+    elif args.cmd == 'summarize':
+        summarize_seg(args)
 
 
 if __name__ == '__main__':
