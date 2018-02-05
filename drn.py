@@ -211,7 +211,6 @@ class DRN(nn.Module):
 
     def forward(self, x):
         y = list()
-
         if self.arch == 'C':
             x = self.conv1(x)
             x = self.bn1(x)
@@ -256,7 +255,6 @@ class DRN(nn.Module):
             return x, y
         else:
             return x
-
 
 def drn_c_26(pretrained=False, **kwargs):
     model = DRN(BasicBlock, [1, 1, 2, 2, 2, 2, 1, 1], arch='C', **kwargs)

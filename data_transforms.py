@@ -41,6 +41,7 @@ class RandomCrop(object):
             results.append(label.crop((x1, y1, x1 + tw, y1 + th)))
         results.extend(args)
         return results
+    
 
 
 class RandomScale(object):
@@ -62,6 +63,32 @@ class RandomScale(object):
             interpolation = Image.CUBIC
         return image.resize((tw, th), interpolation), \
                label.resize((tw, th), Image.NEAREST)
+
+class Rescale(object):
+    def __init__(self, scale):
+        self.ratio = scale
+
+    def __call__(self, image, label, depth):
+        w, h = image.size
+        tw = int(self.ratio * w)
+        th = int(self.ratio * h)
+        if self.ratio == 1:
+            return image, label, depth
+        elif self.ratio < 1:
+            interpolation = Image.ANTIALIAS
+        else:
+            interpolation = Image.CUBIC
+
+        image = image.resize((tw, th), interpolation)
+        label = label.resize((tw, th), Image.NEAREST)
+        depth = depth.resize((tw, th), Image.NEAREST)
+
+        depth_arr = np.array(depth, dtype=np.float32)
+        depth_arr = depth_arr * ratio
+        label_arr = np.array(label, dtype=np.int32)
+        image_arr = np.array(image, dtype=np.int32)
+        return image_arr, label_arr, depth_arr
+    
 
 
 class RandomRotate(object):
@@ -96,6 +123,20 @@ class RandomHorizontalFlip(object):
     """
 
     def __call__(self, image, label):
+        if random.random() < 0.5:
+            results = [image.transpose(Image.FLIP_LEFT_RIGHT),
+                       label.transpose(Image.FLIP_LEFT_RIGHT)]
+        else:
+            results = [image, label]
+        return results
+
+
+class ConvertToClasses(object):
+    def __call__(self, image, label, depth):
+        depth_arr = np.array(depth, dtype=np.float32)
+
+
+
         if random.random() < 0.5:
             results = [image.transpose(Image.FLIP_LEFT_RIGHT),
                        label.transpose(Image.FLIP_LEFT_RIGHT)]
