@@ -12,6 +12,7 @@ import threading
 
 import time
 
+from collections import OrderedDict
 import numpy as np
 import shutil
 
@@ -116,6 +117,95 @@ class DRNSeg(nn.Module):
             yield param
         for param in self.seg.parameters():
             yield param
+
+    def summary(self, input_size):
+        def register_hook(module):
+            def hook(module, input, output):
+                if module._modules:  # only want base layers
+                    return
+                class_name = str(module.__class__).split('.')[-1].split("'")[0]
+                module_idx = len(summary)
+                m_key = '%s-%i' % (class_name, module_idx + 1)
+                summary[m_key] = OrderedDict()
+                summary[m_key]['input_shape'] = list(input[0].size())
+                summary[m_key]['input_shape'][0] = None
+                if output.__class__.__name__ == 'tuple':
+                    summary[m_key]['output_shape'] = list(output[0].size())
+                else:
+                    summary[m_key]['output_shape'] = list(output.size())
+                summary[m_key]['output_shape'][0] = None
+
+                params = 0
+                # iterate through parameters and count num params
+                for name, p in module._parameters.items():
+                    if not p is None:
+                        params += torch.numel(p.data)
+                        summary[m_key]['trainable'] = p.requires_grad
+
+                summary[m_key]['nb_params'] = params
+
+            if not isinstance(module, torch.nn.Sequential) and \
+               not isinstance(module, torch.nn.ModuleList) and \
+               not (module == self):
+                hooks.append(module.register_forward_hook(hook))
+
+        # check if there are multiple inputs to the network
+        if isinstance(input_size[0], (list, tuple)):
+            x = [torch.autograd.Variable(torch.rand(1, *in_size).cuda()) for in_size in input_size]
+        else:
+            x = torch.autograd.Variable(torch.randn(1, *input_size).cuda())
+
+        # x = torch.autograd.Variable(x)
+
+        # create properties
+        summary = OrderedDict()
+        hooks = []
+        # register hook
+        self.apply(register_hook)
+        # make a forward pass
+        self(x)
+        # remove these hooks
+        for h in hooks:
+            h.remove()
+
+        # print out neatly
+        def get_names(module, name, acc):
+            if not module._modules:
+                acc.append(name)
+            else:
+                for key in module._modules.keys():
+                    p_name = key if name == "" else name + "." + key
+                    get_names(module._modules[key], p_name, acc)
+        names = []
+        get_names(self, "", names)
+
+        col_width = 25  # should be >= 12
+        summary_width = 61
+
+        def crop(s):
+            return s[:col_width] if len(s) > col_width else s
+
+        print('_' * summary_width)
+        print('{0: <{3}} {1: <{3}} {2: <{3}}'.format(
+            'Layer (type)', 'Output Shape', 'Param #', col_width))
+        print('=' * summary_width)
+        total_params = 0
+        trainable_params = 0
+        for (i, l_type), l_name in zip(enumerate(summary), names):
+            d = summary[l_type]
+            total_params += d['nb_params']
+            if 'trainable' in d and d['trainable']:
+                trainable_params += d['nb_params']
+            print('{0: <{3}} {1: <{3}} {2: <{3}}'.format(
+                crop(l_name + ' (' + l_type[:-2] + ')'), crop(str(d['output_shape'])),
+                crop(str(d['nb_params'])), col_width))
+            if i < len(summary) - 1:
+                print('_' * summary_width)
+        print('=' * summary_width)
+        print('Total params: ' + str(total_params))
+        print('Trainable params: ' + str(trainable_params))
+        print('Non-trainable params: ' + str((total_params - trainable_params)))
+        print('_' * summary_width)
 
 
 class SegList(torch.utils.data.Dataset):
@@ -657,13 +747,14 @@ def summary(input_size, model):
 
             params = 0
             if hasattr(module, 'weight'):
-                params += th.prod(th.LongTensor(list(module.weight.size())))
+                params += torch.prod(torch.LongTensor(list(module.weight.size())))
                 if module.weight.requires_grad:
                     summary[m_key]['trainable'] = True
                 else:
                     summary[m_key]['trainable'] = False
             if hasattr(module, 'bias'):
-                params +=  th.prod(th.LongTensor(list(module.bias.size())))
+                if not module.bias is None:
+                    params +=  torch.prod(torch.LongTensor(list(module.bias.size())))
             summary[m_key]['nb_params'] = params
             
         if not isinstance(module, nn.Sequential) and \
@@ -673,9 +764,9 @@ def summary(input_size, model):
     
     # check if there are multiple inputs to the network
     if isinstance(input_size[0], (list, tuple)):
-        x = [Variable(th.rand(1,*in_size)) for in_size in input_size]
+        x = [Variable(torch.rand(1,*in_size).cuda()) for in_size in input_size]
     else:
-        x = Variable(th.rand(1,*input_size))
+        x = Variable(torch.rand(1,*input_size).cuda())
 
     # create properties
     summary = OrderedDict()
@@ -683,6 +774,9 @@ def summary(input_size, model):
     # register hook
     model.apply(register_hook)
     # make a forward pass
+    # wt = model.state_dict()
+    # print([type(p) for p in wt.values()])
+    # print(type(x.data))
     model(x)
     # remove these hooks
     for h in hooks:
@@ -692,9 +786,12 @@ def summary(input_size, model):
 
 
 def summarize_seg(args):
-    input_size = (args.crop_size, args.crop_size, 3)
-    model = DRNSeg(args.arch, args.classes, pretrained_model=None, pretrained=False)
-    summary(input_size, model)
+    input_size = (3, args.crop_size, args.crop_size)
+    single_model = DRNSeg(args.arch, args.classes, pretrained_model=None, pretrained=False)
+    single_model = single_model.cuda()
+    # print(single_model)
+    single_model.summary(input_size)
+    # print(summary(input_size, single_model))
 
 
 def test_seg(args):
