@@ -41,7 +41,7 @@ logging.basicConfig(format=FORMAT)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-writer = SummaryWriter('logs/34')
+writer = SummaryWriter('logs/depth')
 
 CITYSCAPE_PALETTE = np.asarray([
     [128, 64, 128],
@@ -252,6 +252,65 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=10, epoch
 
     return score.avg
 
+def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10, epoch=-1, num_classes=5):
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    score = AverageMeter()
+
+    hist = np.zeros((num_classes, num_classes))
+
+    # switch to evaluate mode
+    model.eval()
+
+    end = time.time()
+    for i, (input, seg_target, d_reg_target, d_cls_target) in enumerate(val_loader):
+        input = input.cuda()
+        input_var = torch.autograd.Variable(input, volatile=True)
+        target_var = torch.autograd.Variable(d_cls_target, volatile=True)
+
+        # compute output
+        output = model(input_var)[1]
+        loss = criterion(output, target_var)
+
+        _, pred = torch.max(output, 1)
+        pred = pred.cpu().data.numpy()
+
+        # measure accuracy and record loss
+        # prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        losses.update(loss.data[0], input.size(0))
+        if eval_score is not None:
+            score.update(eval_score(output, target_var), input.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        label = target.cpu().numpy()
+        hist += fast_hist(pred.flatten(), label.flatten(), num_classes)
+
+        if i % print_freq == 0:
+            logger.info('Test: [{0}/{1}]\t'
+                        'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                        'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                        'Score {score.val:.3f} ({score.avg:.3f})'.format(
+                i, len(val_loader), batch_time=batch_time, loss=losses,
+                score=score))
+
+    ious = per_class_iu(hist) * 100
+    mAP = round(np.nanmean(ious), 2)
+    logger.info(' * Score {top1.avg:.3f}'.format(top1=score))
+    logger.info(' '.join('{:.03f}'.format(i) for i in ious))
+    logger.info('mAP: %f', mAP)
+    
+    writer.add_scalar('val_depth/loss', loss.data[0], epoch)
+    writer.add_scalar('val_depth/accuracy', score.avg, epoch)
+    writer.add_scalar('val_depth/mAP', mAP, epoch)
+    # writer.add_image('val/gt', target_var, epoch)
+    # writer.add_image('val/pred', output, epoch)
+    # writer.add_image('val/input', input, epoch)
+
+    return score.avg
+
 
 def train(train_loader, model, criterion_dict, optimizer, epoch,
           eval_score=None, print_freq=10):
@@ -275,7 +334,7 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
     d_cls_weight = 1
     d_reg_weight = 1
 
-    for i, (input, depth_target, seg_target) in enumerate(train_loader):
+    for i, (input, seg_target, depth_target, depth_cls_target, mask) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -283,23 +342,38 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
         #                        torch.nn.modules.loss.MSELoss]:
         #     seg_target = seg_target.float()
         
-        depth_target_flt = depth_target.float()
+        # depth_target_flt = depth_target.float()
 
         input = input.cuda()
         depth_target = depth_target.cuda(async=True)
-        depth_target_flt = depth_target.cuda(async=True)
+        depth_cls_target = depth_cls_target.cuda(async=True)
         seg_target = seg_target.cuda(async=True)
+        mask = mask.cuda(async=True)
 
         input_var = torch.autograd.Variable(input)
         depth_target_var = torch.autograd.Variable(depth_target)
-        depth_target_flt_var = torch.autograd.Variable(depth_target_flt)
+        depth_cls_target_var = torch.autograd.Variable(depth_cls_target)
         seg_target_var = torch.autograd.Variable(seg_target)
+        mask_var = torch.autograd.Variable(mask)
 
         # compute output
-        output = model(input_var)[0]
-        seg_loss = seg_criterion(output, seg_target_var)
-        d_cls_loss = d_cls_criterion(output, depth_target_var)
-        d_reg_loss = d_reg_criterion(output, depth_target_flt_var)
+        seg_output = model(input_var)[0]
+        d_cls_output = model(input_var)[1]
+        d_reg_output = model(input_var)[2]
+        d_reg_output = torch.squeeze(d_reg_output, 1)
+
+        seg_loss = seg_criterion(seg_output, seg_target_var)
+
+        # d_cls_output_mask = torch.masked_select(d_cls_output, mask_var)
+        # d_cls_target_mask = torch.masked_select(depth_cls_target_var, mask_var)
+        d_cls_loss = d_cls_criterion(d_cls_output, depth_cls_target_var)
+        d_cls_loss = d_cls_loss * mask_var
+        d_cls_loss = torch.mean(d_cls_loss)
+
+        # d_reg_output_mask = torch.masked_select(d_reg_output, mask_var)
+        # d_reg_target_mask = torch.masked_select(depth_target_var, mask_var)
+
+        d_reg_loss = d_reg_criterion(d_reg_output, depth_target_var, mask_var, mask_var)
 
         total_loss = seg_weight * seg_loss + d_cls_weight * d_cls_loss + d_reg_weight * d_reg_loss
 
@@ -309,7 +383,7 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
         d_cls_losses.update(d_cls_loss.data[0], input.size(0))
         d_reg_losses.update(d_reg_loss.data[0], input.size(0))
         if eval_score is not None:
-            scores.update(eval_score(output, seg_target_var), input.size(0))
+            scores.update(eval_score(seg_output, seg_target_var), input.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -322,16 +396,25 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
 
         iteration = epoch * len(train_loader) + i
 
-        # gt_arr = vutils.make_grid(target_var.data, normalize=True, scale_each=True)
-        # pred_arr = vutils.make_grid(output.data, normalize=True, scale_each=True)
-        # input_arr = vutils.make_grid(input.data, normalize=True, scale_each=True)
+        _, seg_preds = seg_output.data[0].max(0)
+        _, d_cls_preds = d_cls_output.data[0].max(0)
+
+        input_arr = vutils.make_grid(input[0], normalize=True, scale_each=True)
+        seg_gt_arr = vutils.make_grid(seg_target[0], normalize=False, scale_each=True)
+        d_cls_gt_arr = vutils.make_grid(depth_cls_target[0], normalize=False, scale_each=True)
+        d_reg_gt_arr = vutils.make_grid(depth_target[0], normalize=False, scale_each=True)
+        
+        seg_pred_arr = vutils.make_grid(seg_preds, normalize=False, scale_each=True)
+        d_cls_pred_arr = vutils.make_grid(d_cls_preds, normalize=False, scale_each=True)
+        d_reg_pred_arr = vutils.make_grid(d_reg_output.data[0], normalize=False, scale_each=True)
+        
         if i % print_freq == 0:
             logger.info('Epoch: [{0}][{1}/{2}]\t'
                         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                         'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                        'seg_loss {loss1.val:.4f} ({loss.avg:.4f})\t'
-                        'd_cls_loss {loss2.val:.4f} ({loss.avg:.4f})\t'
-                        'd_reg_loss {loss3.val:.4f} ({loss.avg:.4f})\t'
+                        'seg_loss {loss1.val:.4f} ({loss1.avg:.4f})\t'
+                        'd_cls_loss {loss2.val:.4f} ({loss2.avg:.4f})\t'
+                        'd_reg_loss {loss3.val:.4f} ({loss3.avg:.4f})\t'
                         'Score {top1.val:.3f} ({top1.avg:.3f})'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
                 data_time=data_time, loss1=seg_losses, loss2=d_cls_losses,
@@ -342,8 +425,12 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
             writer.add_scalar('train/d_reg_loss', d_reg_loss.data[0], iteration)
             writer.add_scalar('train/total_loss', total_loss.data[0], iteration)
             writer.add_scalar('train/seg_accuracy', scores.val, iteration)
-            # writer.add_image('train/gt', gt_arr, iteration)
-            # writer.add_image('train/pred', pred_arr, iteration)
+            writer.add_image('train/seg_gt', seg_gt_arr, iteration)
+            writer.add_image('train/seg_pred', seg_pred_arr, iteration)
+            writer.add_image('train/d_cls_gt', d_cls_gt_arr, iteration)
+            writer.add_image('train/d_cls_pred', d_cls_pred_arr, iteration)
+            writer.add_image('train/d_reg_gt', d_reg_gt_arr, iteration)
+            writer.add_image('train/d_reg_pred', d_reg_pred_arr, iteration)
             # writer.add_image('train/input', input_arr, iteration)
 
 
@@ -467,54 +554,56 @@ def train_depth_seg(args):
 
     single_model = DRNDepthSeg(args.arch, seg_classes=args.classes, depth_classes=5, 
                     pretrained_model=None, pretrained=True, train_base=args.train_base,
-                    train_seg=args.train_seg, train_depth=args.train.depth)
+                    train_seg=args.train_seg, train_depth=args.train_depth)
 
     if args.pretrained:
-        single_model.load_state_dict(torch.load(args.pretrained))
+        state = single_model.state_dict()
+        state.update(torch.load(args.pretrained))
+        single_model.load_state_dict(state)
+        # single_model.load_state_dict()
     model = torch.nn.DataParallel(single_model).cuda()
-    
-    if args.train_seg:
-        seg_criterion = nn.NLLLoss2d(ignore_index=255)
-        seg_criterion.cuda()
 
-    if args.train_depth:
-        d_cls_criterion = nn.NLLLoss2d(ignore_index=0)
-        d_cls_criterion.cuda()
-        d_reg_criterion = nn.MSELoss()
-        d_reg_criterion.cuda()
+    criterion_dict = {}
+    
+    # if args.train_seg:
+    seg_criterion = nn.NLLLoss2d(ignore_index=255)
+    seg_criterion.cuda()
+    criterion_dict['seg'] = seg_criterion
+
+    # if args.train_depth:
+    d_cls_criterion = nn.NLLLoss2d(size_average=False, reduce=False)
+    d_cls_criterion.cuda()
+    d_reg_criterion = MaskedMSE()
+    d_reg_criterion.cuda()
+    criterion_dict['d_reg'] = d_reg_criterion
+    criterion_dict['d_cls'] = d_cls_criterion
     
 
     # Data loading code
     data_dir = args.data_dir
     info = json.load(open(join(data_dir, 'info.json'), 'r'))
-    normalize = transforms.Normalize(mean=info['mean'],
-                                     std=info['std'])
+    normalizeDepth = transforms.NormalizeDepth(mean=info['mean'], std=info['std'])
+    normalize = transforms.Normalize(mean=info['mean'], std=info['std'])
     t = []
     if args.random_rotate > 0:
         t.append(transforms.RandomRotate(args.random_rotate))
     if args.random_scale > 0:
         t.append(transforms.RandomScale(args.random_scale))
-    t.extend([transforms.RandomHorizontalFlip(),
-              transforms.Rescale(0.25),
-              transforms.ToTensor(),
-              normalize])
+    
+    t.extend([transforms.RandomHorizontalFlipDepth(),
+              transforms.RescaleDepth(0.25),
+              transforms.ConvertToClasses(),
+              transforms.ToTensorDepth(),
+              normalizeDepth])
+
     train_loader = torch.utils.data.DataLoader(
-        SegList(data_dir, 'train', transforms.Compose(t)),
+        SegDepthList(data_dir, 'train', transforms.Compose(t)),
         batch_size=batch_size, shuffle=True, num_workers=num_workers,
         pin_memory=False, drop_last=True
     )
-    # val_loader = torch.utils.data.DataLoader(
-    #     SegList(data_dir, 'val', transforms.Compose([
-    #         transforms.RandomCrop(crop_size),
-    #         transforms.ToTensor(),
-    #         normalize,
-    #     ])),
-    #     batch_size=1, shuffle=False, num_workers=num_workers,
-    #     pin_memory=True, drop_last=False
-    # )
 
     val_loader = torch.utils.data.DataLoader(
-        SegList(data_dir, 'val', transforms.Compose([
+        SegDepthList(data_dir, 'val', transforms.Compose([
             transforms.ToTensor(),
             normalize,
         ])),
@@ -553,11 +642,12 @@ def train_depth_seg(args):
         lr = adjust_learning_rate(args, optimizer, epoch)
         logger.info('Epoch: [{0}]\tlr {1:.06f}'.format(epoch, lr))
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch,
+        train(train_loader, model, criterion_dict, optimizer, epoch,
               eval_score=accuracy)
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion, eval_score=accuracy, epoch=epoch)
+        # prec1 = validate(val_loader, model, seg_criterion, eval_score=accuracy, epoch=epoch)
+        prec1 = validate_depth(val_loader, model, d_cls_criterion, eval_score=accuracy, epoch=epoch)
 
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
@@ -657,10 +747,34 @@ def test_ms(eval_data_loader, model, num_classes, scales,
         return round(np.nanmean(ious), 2)
 
 def summarize_seg(args):
-    input_size = (3, args.crop_size, args.crop_size)
+    input_size = (3, 256, 512)
     single_model = DRNDepthSeg(args.arch, seg_classes=args.classes, depth_classes=5, pretrained_model=None, pretrained=False)
+    # single_model = DRNSeg(args.arch, classes=args.classes, pretrained_model=None, pretrained=False)
     single_model = single_model.cuda()
     single_model.summary(input_size)
+
+
+def test_dummy(args):
+    batch_size = args.batch_size
+    num_workers = args.workers
+    phase = args.phase
+
+    for k, v in args.__dict__.items():
+        print(k, ':', v)
+
+    single_model = DRNSeg(args.arch, args.classes, pretrained_model=None,
+                          pretrained=False)
+    if args.pretrained:
+        single_model.load_state_dict(torch.load(args.pretrained))
+        tokens = args.pretrained.split('.')
+        checkpoint_path = tokens[0] + '-ckpt.' + tokens[1]
+        save_checkpoint({
+            'epoch': -1,
+            'arch': args.arch,
+            'state_dict': single_model.state_dict(),
+            'best_prec1': 0,
+        }, False, filename=checkpoint_path)
+
 
 
 def test_seg(args):
@@ -768,6 +882,9 @@ def parse_args():
                         help='Turn on multi-scale testing')
     parser.add_argument('--with-gt', action='store_true')
     parser.add_argument('--test-suffix', default='', type=str)
+    parser.add_argument('--train-base', action='store_true')
+    parser.add_argument('--train-seg', action='store_true')
+    parser.add_argument('--train-depth', action='store_true')
     args = parser.parse_args()
 
     assert args.data_dir is not None
@@ -785,9 +902,9 @@ def parse_args():
 def main():
     args = parse_args()
     if args.cmd == 'train':
-        train_seg(args)
+        train_depth_seg(args)
     elif args.cmd == 'test':
-        test_seg(args)
+        test_dummy(args)
     elif args.cmd == 'summarize':
         summarize_seg(args)
 
