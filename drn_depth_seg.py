@@ -22,9 +22,19 @@ class DRNDepthSeg(nn.Module):
 
         self.seg = nn.Conv2d(model.out_dim, seg_classes, kernel_size=1, bias=True)
 
-        self.depth_conv_layer = nn.Conv2d(num_channels, out_channels=num_channels, kernel_size=1, bias=True)
-        self.depth_cls_layer = nn.Conv2d(num_channels, out_channels=depth_classes, kernel_size=1, bias=True)
-        self.depth_reg_layer = nn.Conv2d(num_channels, out_channels=1, kernel_size=1, bias=True)
+        depth_convs = []
+        depth_convs.extend([nn.Conv2d(in_channels=num_channels, out_channels=256, kernel_size=3,
+                            bias=False, padding=1),
+                            nn.BatchNorm2d(256),
+                            nn.ReLU(inplace=True)])
+        depth_convs.extend([nn.Conv2d(in_channels=256, out_channels=128, kernel_size=3,
+                            bias=False, padding=1),
+                            nn.BatchNorm2d(128),
+                            nn.ReLU(inplace=True)])
+
+        self.depth_convs = nn.Sequential(*depth_convs)
+        self.depth_cls_layer = nn.Conv2d(in_channels=128, out_channels=depth_classes, kernel_size=1, bias=True)
+        self.depth_reg_layer = nn.Conv2d(in_channels=128, out_channels=1, kernel_size=1, bias=True)
 
         # self.pred_params_conv = nn.Conv2d(num_channels, out_channels=num_channels/2, kernel_size=1, bias=True)
         # self.pred_params = nn.Conv2d(num_channels, out_channels=num_channels/2, kernel_size=1, bias=True)
@@ -32,6 +42,15 @@ class DRNDepthSeg(nn.Module):
         self.softmax = nn.LogSoftmax()
 
         fill_conv_weights(self.seg)
+
+        for m in self.depth_convs:
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
         fill_conv_weights(self.depth_cls_layer)
         fill_conv_weights(self.depth_reg_layer)
 
@@ -51,11 +70,12 @@ class DRNDepthSeg(nn.Module):
 
     def forward(self, x):
         x = self.base(x)
-        y_d = self.depth_conv_layer(x)
-        y_d_cls = self.depth_cls_layer(x)
-        y_d_reg = self.depth_reg_layer(x)
         y_s = self.seg(x)
         y_s = self.up(y_s)
+        x = self.depth_convs(x)
+        y_d_cls = self.depth_cls_layer(x)
+        y_d_reg = self.depth_reg_layer(x)
+
         return self.softmax(y_s), self.softmax(y_d_cls), y_d_reg
 
     def optim_parameters(self, memo=None):
@@ -68,8 +88,9 @@ class DRNDepthSeg(nn.Module):
                 yield param
         
         if self.train_depth:
-            for param in self.depth_conv_layer.parameters():
-                yield param
+            for m in self.depth_convs:
+                for param in m.parameters():
+                    yield param
             for param in self.depth_cls_layer.parameters():
                 yield param
             for param in self.depth_reg_layer.parameters():
