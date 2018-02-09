@@ -8,6 +8,8 @@ import torch
 import shutil
 import threading
 
+from torch import nn
+
 def adjust_learning_rate(args, optimizer, epoch):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     if args.lr_mode == 'step':
@@ -76,6 +78,18 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+class MaskedMSE(nn.Module):
+    def __init__(self):
+        super(MaskedMSE, self).__init__()
+        self.criterion = nn.MSELoss()
+
+    def forward(self, input, target, mask_a, mask_b):
+        self.loss = self.criterion(input * mask_a, target * mask_b)
+        return self.loss
+
+
 
 def accuracy(output, target):
     """Computes the precision@k for the specified values of k"""
