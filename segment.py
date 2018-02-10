@@ -265,6 +265,9 @@ def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10,
     end = time.time()
     for i, (input, seg_target, d_reg_target, d_cls_target, mask) in enumerate(val_loader):
         input = input.cuda()
+        d_cls_target = d_cls_target.cuda(async=True)
+        mask = mask.cuda(async=True)
+
         input_var = torch.autograd.Variable(input, volatile=True)
         target_var = torch.autograd.Variable(d_cls_target, volatile=True)
         mask_var = torch.autograd.Variable(mask, volatile=True)
@@ -289,7 +292,7 @@ def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10,
         batch_time.update(time.time() - end)
         end = time.time()
 
-        label = target.cpu().numpy()
+        label = d_cls_target.cpu().numpy()
         hist += fast_hist(pred.flatten(), label.flatten(), num_classes)
 
         if i % print_freq == 0:
@@ -619,6 +622,8 @@ def train_depth_seg(args):
 
     val_loader = torch.utils.data.DataLoader(
         SegDepthList(data_dir, 'val', transforms.Compose([
+            transforms.RescaleDepth(0.25),
+            transforms.ConvertToClasses(),
             transforms.ToTensorDepth(),
             normalizeDepth,
         ])),
