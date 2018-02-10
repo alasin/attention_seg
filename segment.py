@@ -263,14 +263,18 @@ def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10,
     model.eval()
 
     end = time.time()
-    for i, (input, seg_target, d_reg_target, d_cls_target) in enumerate(val_loader):
+    for i, (input, seg_target, d_reg_target, d_cls_target, mask) in enumerate(val_loader):
         input = input.cuda()
         input_var = torch.autograd.Variable(input, volatile=True)
         target_var = torch.autograd.Variable(d_cls_target, volatile=True)
+        mask_var = torch.autograd.Variable(mask, volatile=True)
 
         # compute output
         output = model(input_var)[1]
         loss = criterion(output, target_var)
+
+        loss = loss * mask_var
+        loss = torch.mean(loss)
 
         _, pred = torch.max(output, 1)
         pred = pred.cpu().data.numpy()
@@ -279,7 +283,7 @@ def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10,
         # prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
         losses.update(loss.data[0], input.size(0))
         if eval_score is not None:
-            score.update(eval_score(output, target_var), input.size(0))
+            score.update(eval_score(output, target_var, mask_var), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -334,7 +338,7 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
     d_cls_weight = 1
     d_reg_weight = 1
 
-    for i, (input, seg_target, depth_target, depth_cls_target, mask) in enumerate(train_loader):
+    for i, (input, seg_target, d_reg_target, d_cls_target, mask) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -345,35 +349,46 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
         # depth_target_flt = depth_target.float()
 
         input = input.cuda()
-        depth_target = depth_target.cuda(async=True)
-        depth_cls_target = depth_cls_target.cuda(async=True)
+        d_reg_target = d_reg_target.cuda(async=True)
+        d_cls_target = d_cls_target.cuda(async=True)
         seg_target = seg_target.cuda(async=True)
         mask = mask.cuda(async=True)
 
         input_var = torch.autograd.Variable(input)
-        depth_target_var = torch.autograd.Variable(depth_target)
-        depth_cls_target_var = torch.autograd.Variable(depth_cls_target)
+        d_reg_target_var = torch.autograd.Variable(d_reg_target)
+        d_cls_target_var = torch.autograd.Variable(d_cls_target)
         seg_target_var = torch.autograd.Variable(seg_target)
         mask_var = torch.autograd.Variable(mask)
 
         # compute output
         seg_output = model(input_var)[0]
+        # print(seg_output.size())
+        # print(seg_target_var.size())
         d_cls_output = model(input_var)[1]
+        # print(d_cls_output.size())
+        # print(d_cls_target_var.size())
         d_reg_output = model(input_var)[2]
+        # print(d_reg_output.size())
+        # print(d_reg_target_var.size())
         d_reg_output = torch.squeeze(d_reg_output, 1)
+        # print(d_reg_output.size())
+        # print(d_reg_target_var.size())
 
         seg_loss = seg_criterion(seg_output, seg_target_var)
 
         # d_cls_output_mask = torch.masked_select(d_cls_output, mask_var)
         # d_cls_target_mask = torch.masked_select(depth_cls_target_var, mask_var)
-        d_cls_loss = d_cls_criterion(d_cls_output, depth_cls_target_var)
+        d_cls_loss = d_cls_criterion(d_cls_output, d_cls_target_var)
+        # print(d_cls_loss.size())
+        # print(mask_var.size())
         d_cls_loss = d_cls_loss * mask_var
         d_cls_loss = torch.mean(d_cls_loss)
 
         # d_reg_output_mask = torch.masked_select(d_reg_output, mask_var)
         # d_reg_target_mask = torch.masked_select(depth_target_var, mask_var)
 
-        d_reg_loss = d_reg_criterion(d_reg_output, depth_target_var, mask_var, mask_var)
+        d_reg_loss = d_reg_criterion(d_reg_output, d_reg_target_var, mask_var, mask_var)
+        # print(d_reg_loss.size())
 
         total_loss = seg_weight * seg_loss + d_cls_weight * d_cls_loss + d_reg_weight * d_reg_loss
 
@@ -383,7 +398,7 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
         d_cls_losses.update(d_cls_loss.data[0], input.size(0))
         d_reg_losses.update(d_reg_loss.data[0], input.size(0))
         if eval_score is not None:
-            scores.update(eval_score(seg_output, seg_target_var), input.size(0))
+            scores.update(eval_score(d_cls_output, d_cls_target_var, mask_var), input.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -400,13 +415,13 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
         _, d_cls_preds = d_cls_output.data[0].max(0)
 
         input_arr = vutils.make_grid(input[0], normalize=True, scale_each=True)
-        seg_gt_arr = vutils.make_grid(seg_target[0], normalize=False, scale_each=True)
-        d_cls_gt_arr = vutils.make_grid(depth_cls_target[0], normalize=False, scale_each=True)
-        d_reg_gt_arr = vutils.make_grid(depth_target[0], normalize=False, scale_each=True)
+        seg_gt_arr = vutils.make_grid(seg_target[0], normalize=True, scale_each=True)
+        d_cls_gt_arr = vutils.make_grid(d_cls_target[0], normalize=True, scale_each=True)
+        d_reg_gt_arr = vutils.make_grid(d_reg_target[0], normalize=True, scale_each=True)
         
-        seg_pred_arr = vutils.make_grid(seg_preds, normalize=False, scale_each=True)
-        d_cls_pred_arr = vutils.make_grid(d_cls_preds, normalize=False, scale_each=True)
-        d_reg_pred_arr = vutils.make_grid(d_reg_output.data[0], normalize=False, scale_each=True)
+        seg_pred_arr = vutils.make_grid(seg_preds, normalize=True, scale_each=True)
+        d_cls_pred_arr = vutils.make_grid(d_cls_preds, normalize=True, scale_each=True)
+        d_reg_pred_arr = vutils.make_grid(d_reg_output.data[0], normalize=True, scale_each=True)
         
         if i % print_freq == 0:
             logger.info('Epoch: [{0}][{1}/{2}]\t'
@@ -604,8 +619,8 @@ def train_depth_seg(args):
 
     val_loader = torch.utils.data.DataLoader(
         SegDepthList(data_dir, 'val', transforms.Compose([
-            transforms.ToTensor(),
-            normalize,
+            transforms.ToTensorDepth(),
+            normalizeDepth,
         ])),
         batch_size=1, shuffle=False, num_workers=num_workers,
         pin_memory=False, drop_last=False
@@ -643,11 +658,11 @@ def train_depth_seg(args):
         logger.info('Epoch: [{0}]\tlr {1:.06f}'.format(epoch, lr))
         # train for one epoch
         train(train_loader, model, criterion_dict, optimizer, epoch,
-              eval_score=accuracy)
+              eval_score=accuracy_depth)
 
         # evaluate on validation set
         # prec1 = validate(val_loader, model, seg_criterion, eval_score=accuracy, epoch=epoch)
-        prec1 = validate_depth(val_loader, model, d_cls_criterion, eval_score=accuracy, epoch=epoch)
+        prec1 = validate_depth(val_loader, model, d_cls_criterion, eval_score=accuracy_depth, epoch=epoch)
 
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
