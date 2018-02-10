@@ -103,6 +103,19 @@ def accuracy(output, target):
     score = correct.float().sum(0).mul(100.0 / correct.size(0))
     return score.data[0]
 
+def accuracy_depth(output, target, mask):
+    """Computes the precision@k for the specified values of k"""
+    # batch_size = target.size(0) * target.size(1) * target.size(2)
+    _, pred = output.max(1)
+    pred = torch.masked_select(pred, mask.byte())
+    target = torch.masked_select(target, mask.byte())
+    pred = pred.view(1, -1)
+    target = target.view(1, -1)
+    correct = pred.eq(target)
+    correct = correct.view(-1)
+    score = correct.float().sum(0).mul(100.0 / correct.size(0))
+    return score.data[0]
+
 def fill_up_weights(up):
     w = up.weight.data
     f = math.ceil(w.size(2) / 2)
