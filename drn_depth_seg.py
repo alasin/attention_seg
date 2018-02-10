@@ -41,6 +41,8 @@ class DRNDepthSeg(nn.Module):
 
         self.softmax = nn.LogSoftmax()
 
+
+        ########## Initialize weights ##########
         fill_conv_weights(self.seg)
 
         for m in self.depth_convs:
@@ -53,6 +55,7 @@ class DRNDepthSeg(nn.Module):
 
         fill_conv_weights(self.depth_cls_layer)
         fill_conv_weights(self.depth_reg_layer)
+        ########## Initialize weights ##########
 
         if use_torch_up:
             self.up = nn.UpsamplingBilinear2d(scale_factor=8)
