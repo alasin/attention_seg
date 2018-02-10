@@ -49,10 +49,9 @@ class RescaleDepth(object):
 
 class ConvertToClasses(object):
     def __call__(self, image, label, depth):
-        depth_arr = np.array(depth, np.int32)
-        mask = (depth_arr == 0)
+        depth_arr = np.array(depth, np.float32)
+        mask = (depth_arr > 0)
 
-        depth_arr = depth_arr.astype(np.float32)
         depth_arr[depth_arr < 10] = 1
         depth_orig = np.log2(depth_arr)
         depth_cls = np.copy(depth_orig)
