@@ -6,6 +6,113 @@ from PIL import Image, ImageOps
 import torch
 
 
+class RandomHorizontalFlipDepth(object):
+    """Randomly horizontally flips the given PIL.Image with a probability of 0.5
+    """
+
+    def __call__(self, image, label, depth):
+        if random.random() < 0.5:
+            results = [image.transpose(Image.FLIP_LEFT_RIGHT),
+                       label.transpose(Image.FLIP_LEFT_RIGHT),
+                       depth.transpose(Image.FLIP_LEFT_RIGHT)]
+        else:
+            results = [image, label, depth]
+        return results
+
+
+class RescaleDepth(object):
+    def __init__(self, scale):
+        self.ratio = scale
+        self.depth_ratio = scale * 0.125
+
+    def __call__(self, image, label, depth):
+        w, h = image.size
+        tw = int(self.ratio * w)
+        th = int(self.ratio * h)
+
+        tw_depth = int(self.depth_ratio * w)
+        th_depth = int(self.depth_ratio * h)
+
+        if self.ratio == 1:
+            return image, label, depth
+        elif self.ratio < 1:
+            interpolation = Image.ANTIALIAS
+        else:
+            interpolation = Image.CUBIC
+
+        image = image.resize((tw, th), interpolation)
+        label = label.resize((tw, th), Image.NEAREST)
+        depth = depth.resize((tw_depth, th_depth), Image.NEAREST)
+        print(depth.mode)
+        sys.exit()
+        
+        return image, label, depth
+
+
+class ConvertToClasses(object):
+    def __call__(self, image, label, depth):
+        depth_arr = np.array(depth, np.int32)
+        mask = (depth_arr == 0)
+
+        depth_arr = depth_arr.astype(np.float32)
+        depth_arr[depth_arr < 10] = 1
+        depth_orig = np.log2(depth_arr)
+        depth_cls = np.copy(depth_orig)
+        threshList = [0, 11, 12.5, 13.2, 13.9, 20]
+
+        for i in range(len(threshList) - 1):
+            temp_mask = np.logical_and(depth_cls > threshList[i], depth_cls <= threshList[i+1])
+            depth_cls[temp_mask] = i
+        
+        depth_cls = depth_cls.astype(np.int32)
+        mask = mask.astype(np.uint8)
+
+        return image, label, depth_orig, depth_cls, mask
+
+
+class ToTensorDepth(object):
+    """Converts a PIL.Image or numpy.ndarray (H x W x C) in the range
+    [0, 255] to a torch.FloatTensor of shape (C x H x W) in the range [0.0, 1.0].
+    """
+
+    def __call__(self, pic, label, depth, depth_cls, mask):
+        img = torch.ByteTensor(torch.ByteStorage.from_buffer(pic.tobytes()))
+        # PIL image mode: 1, L, P, I, F, RGB, YCbCr, RGBA, CMYK
+        if pic.mode == 'YCbCr':
+            nchannel = 3
+        else:
+            nchannel = len(pic.mode)
+        img = img.view(pic.size[1], pic.size[0], nchannel)
+        # put it from HWC to CHW format
+        # yikes, this transpose takes 80% of the loading time/CPU
+        img = img.transpose(0, 1).transpose(0, 2).contiguous()
+        img = img.float().div(255)
+
+        label = torch.LongTensor(np.array(label, dtype=np.int32))
+        depth = torch.FloatTensor(depth)
+        depth_cls = torch.LongTensor(depth_cls)
+        mask = torch.from_numpy(mask).float()
+        
+        return img, label, depth, depth_cls, mask
+
+    
+class NormalizeDepth(object):
+    """Given mean: (R, G, B) and std: (R, G, B),
+    will normalize each channel of the torch.*Tensor, i.e.
+    channel = (channel - mean) / std
+    """
+
+    def __init__(self, mean, std):
+        self.mean = torch.FloatTensor(mean)
+        self.std = torch.FloatTensor(std)
+
+    def __call__(self, image, label, depth, depth_cls, mask):
+        for t, m, s in zip(image, self.mean, self.std):
+            t.sub_(m).div_(s)
+        
+        return image, label, depth, depth_cls, mask
+
+
 class RandomCrop(object):
     def __init__(self, size):
         if isinstance(size, numbers.Number):
@@ -63,108 +170,6 @@ class RandomScale(object):
             interpolation = Image.CUBIC
         return image.resize((tw, th), interpolation), \
                label.resize((tw, th), Image.NEAREST)
-
-class RescaleDepth(object):
-    def __init__(self, scale):
-        self.ratio = scale
-        self.depth_ratio = scale * 0.125
-
-    def __call__(self, image, label, depth):
-        w, h = image.size
-        tw = int(self.ratio * w)
-        th = int(self.ratio * h)
-
-        tw_depth = int(self.depth_ratio * w)
-        th_depth = int(self.depth_ratio * h)
-
-        if self.ratio == 1:
-            return image, label, depth
-        elif self.ratio < 1:
-            interpolation = Image.ANTIALIAS
-        else:
-            interpolation = Image.CUBIC
-
-        image = image.resize((tw, th), interpolation)
-        label = label.resize((tw, th), Image.NEAREST)
-        depth = depth.resize((tw_depth, th_depth), Image.NEAREST)
-        
-        return image, label, depth
-
-
-class ConvertToClasses(object):
-    def __call__(self, image, label, depth):
-        depth_arr = np.array(depth, np.float32)
-        mask = (depth_arr < 0.0001)
-
-        depth_arr[depth_arr < 10] = 1
-        depth_orig = np.log2(depth_arr)
-        depth_cls = np.copy(depth_orig)
-        threshList = [0, 11, 12.5, 13.2, 13.9, 20]
-
-        for i in range(len(threshList) - 1):
-            temp_mask = np.logical_and(depth_cls > threshList[i], depth_cls <= threshList[i+1])
-            depth_cls[temp_mask] = i
-        
-        depth_cls = depth_cls.astype(np.int32)
-        mask = mask.astype(np.uint8)
-
-        return image, label, depth_orig, depth_cls, mask
-
-class ToTensorDepth(object):
-    """Converts a PIL.Image or numpy.ndarray (H x W x C) in the range
-    [0, 255] to a torch.FloatTensor of shape (C x H x W) in the range [0.0, 1.0].
-    """
-
-    def __call__(self, pic, label, depth, depth_cls, mask):
-        img = torch.ByteTensor(torch.ByteStorage.from_buffer(pic.tobytes()))
-        # PIL image mode: 1, L, P, I, F, RGB, YCbCr, RGBA, CMYK
-        if pic.mode == 'YCbCr':
-            nchannel = 3
-        else:
-            nchannel = len(pic.mode)
-        img = img.view(pic.size[1], pic.size[0], nchannel)
-        # put it from HWC to CHW format
-        # yikes, this transpose takes 80% of the loading time/CPU
-        img = img.transpose(0, 1).transpose(0, 2).contiguous()
-        img = img.float().div(255)
-
-        label = torch.LongTensor(np.array(label, dtype=np.int32))
-        depth = torch.FloatTensor(depth)
-        depth_cls = torch.LongTensor(depth_cls)
-        mask = torch.from_numpy(mask).float()
-        
-        return img, label, depth, depth_cls, mask
-
-    
-class NormalizeDepth(object):
-    """Given mean: (R, G, B) and std: (R, G, B),
-    will normalize each channel of the torch.*Tensor, i.e.
-    channel = (channel - mean) / std
-    """
-
-    def __init__(self, mean, std):
-        self.mean = torch.FloatTensor(mean)
-        self.std = torch.FloatTensor(std)
-
-    def __call__(self, image, label, depth, depth_cls, mask):
-        for t, m, s in zip(image, self.mean, self.std):
-            t.sub_(m).div_(s)
-        
-        return image, label, depth, depth_cls, mask
-
-class RandomHorizontalFlipDepth(object):
-    """Randomly horizontally flips the given PIL.Image with a probability of 0.5
-    """
-
-    def __call__(self, image, label, depth):
-        if random.random() < 0.5:
-            results = [image.transpose(Image.FLIP_LEFT_RIGHT),
-                       label.transpose(Image.FLIP_LEFT_RIGHT),
-                       depth.transpose(Image.FLIP_LEFT_RIGHT)]
-        else:
-            results = [image, label, depth]
-        return results
-
 
 class RandomRotate(object):
     """Crops the given PIL.Image at a random location to have a region of
