@@ -43,8 +43,6 @@ class RescaleDepth(object):
         image = image.resize((tw, th), interpolation)
         label = label.resize((tw, th), Image.NEAREST)
         depth = depth.resize((tw_depth, th_depth), Image.NEAREST)
-        print(depth.mode)
-        sys.exit()
         
         return image, label, depth
 
