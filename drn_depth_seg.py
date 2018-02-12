@@ -18,21 +18,24 @@ class DRNDepthSeg(nn.Module):
         pmodel = nn.DataParallel(model)
         if pretrained_model is not None:
             pmodel.load_state_dict(pretrained_model)
-        self.base = nn.Sequential(*list(model.children())[:-2])
 
+        self.base_modules = list(model.children())
+        self.num_base_modules = len(self.base_modules)
+
+        self.base = nn.Sequential(*self.base_modules[:-2])
         self.seg = nn.Conv2d(model.out_dim, seg_classes, kernel_size=1, bias=True)
 
-        depth_convs = []
-        depth_convs.extend([nn.Conv2d(in_channels=num_channels, out_channels=256, kernel_size=3,
+        depth_base = []
+        depth_base.extend([nn.Conv2d(in_channels=num_channels, out_channels=256, kernel_size=3,
                             bias=False, padding=1),
                             nn.BatchNorm2d(256),
                             nn.ReLU(inplace=True)])
-        depth_convs.extend([nn.Conv2d(in_channels=256, out_channels=128, kernel_size=3,
+        depth_base.extend([nn.Conv2d(in_channels=256, out_channels=128, kernel_size=3,
                             bias=False, padding=1),
                             nn.BatchNorm2d(128),
                             nn.ReLU(inplace=True)])
 
-        self.depth_convs = nn.Sequential(*depth_convs)
+        self.depth_base = nn.Sequential(*depth_base)
         self.depth_cls_layer = nn.Conv2d(in_channels=128, out_channels=depth_classes, kernel_size=1, bias=True)
         self.depth_reg_layer = nn.Conv2d(in_channels=128, out_channels=1, kernel_size=1, bias=True)
 
@@ -45,7 +48,7 @@ class DRNDepthSeg(nn.Module):
         ########## Initialize weights ##########
         fill_conv_weights(self.seg)
 
-        for m in self.depth_convs:
+        for m in self.depth_base:
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
                 m.weight.data.normal_(0, math.sqrt(2. / n))
@@ -67,19 +70,33 @@ class DRNDepthSeg(nn.Module):
             up.weight.requires_grad = False
             self.up = up
         
+        self.up_depth = nn.UpsamplingBilinear2d(scale_factor=8)
         self.train_base = train_base
         self.train_seg = train_seg
         self.train_depth = train_depth
 
     def forward(self, x):
-        x = self.base(x)
-        y_s = self.seg(x)
+        x = self.forward_base(x, 0, self.num_base_modules - 4)
+        x_s = self.forward_base(x, self.num_base_modules - 4, self.num_base_modules - 2)
+        
+        # x_s = self.seg_base(x)
+        y_s = self.seg(x_s)
         y_s = self.up(y_s)
-        x = self.depth_convs(x)
-        y_d_cls = self.depth_cls_layer(x)
-        y_d_reg = self.depth_reg_layer(x)
+
+        x_d = self.depth_base(x)
+        # print(x_d.size())
+        x_d = self.up_depth(x_d)
+        # print(x_d.size())
+        y_d_cls = self.depth_cls_layer(x_d)
+        y_d_reg = self.depth_reg_layer(x_d)
 
         return self.softmax(y_s), self.softmax(y_d_cls), y_d_reg
+
+    def forward_base(self, x, start, end):
+        base_subset = nn.Sequential(*self.base_modules[start:end])
+        x = base_subset(x)
+
+        return x
 
     def optim_parameters(self, memo=None):
         if self.train_base:
@@ -87,11 +104,13 @@ class DRNDepthSeg(nn.Module):
                 yield param
         
         if self.train_seg:
+            for param in self.seg_base.parameters():
+                yield param
             for param in self.seg.parameters():
                 yield param
         
         if self.train_depth:
-            for m in self.depth_convs:
+            for m in self.depth_base:
                 for param in m.parameters():
                     yield param
             for param in self.depth_cls_layer.parameters():

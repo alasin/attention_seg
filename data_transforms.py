@@ -5,7 +5,6 @@ import numpy as np
 from PIL import Image, ImageOps
 import torch
 
-
 class RandomHorizontalFlipDepth(object):
     """Randomly horizontally flips the given PIL.Image with a probability of 0.5
     """
@@ -23,7 +22,7 @@ class RandomHorizontalFlipDepth(object):
 class RescaleDepth(object):
     def __init__(self, scale):
         self.ratio = scale
-        self.depth_ratio = scale * 0.125
+        self.depth_ratio = scale
 
     def __call__(self, image, label, depth):
         w, h = image.size
@@ -42,8 +41,8 @@ class RescaleDepth(object):
 
         image = image.resize((tw, th), interpolation)
         label = label.resize((tw, th), Image.NEAREST)
-        depth = depth.resize((tw_depth, th_depth), Image.NEAREST)
-        
+        depth = depth.resize((tw_depth, th_depth), Image.BICUBIC)
+
         return image, label, depth
 
 
@@ -52,7 +51,7 @@ class ConvertToClasses(object):
         depth_arr = np.array(depth, np.float32)
         mask = (depth_arr > 0)
 
-        depth_arr[depth_arr < 10] = 1
+        depth_arr[depth_arr < 2] = 1
         depth_orig = np.log2(depth_arr)
         depth_cls = np.copy(depth_orig)
         threshList = [0, 11, 12.5, 13.2, 13.9, 20]
