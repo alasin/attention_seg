@@ -90,6 +90,8 @@ class MaskedMSE(nn.Module):
         return self.loss
 
 
+def to_np(x):
+    return x.cpu().numpy()
 
 def accuracy(output, target):
     """Computes the precision@k for the specified values of k"""

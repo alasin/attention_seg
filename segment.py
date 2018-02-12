@@ -27,6 +27,7 @@ from drn_seg import DRNSeg
 from drn_depth_seg import DRNDepthSeg
 
 from tensorboardX import SummaryWriter
+from logger import Logger
 import torchvision.utils as vutils
 
 try:
@@ -41,7 +42,8 @@ logging.basicConfig(format=FORMAT)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-writer = SummaryWriter('logs/depth')
+# writer = SummaryWriter('logs/depth')
+writer = Logger('logs/depth')
 
 CITYSCAPE_PALETTE = np.asarray([
     [128, 64, 128],
@@ -243,12 +245,9 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=10, epoch
     logger.info(' '.join('{:.03f}'.format(i) for i in ious))
     logger.info('mAP: %f', mAP)
     
-    writer.add_scalar('val/loss', loss.data[0], epoch)
-    writer.add_scalar('val/accuracy', score.avg, epoch)
-    writer.add_scalar('val/mAP', mAP, epoch)
-    # writer.add_image('val/gt', target_var, epoch)
-    # writer.add_image('val/pred', output, epoch)
-    # writer.add_image('val/input', input, epoch)
+    writer.scalar_summary('val/loss', loss.data[0], epoch)
+    writer.scalar_summary('val/accuracy', score.avg, epoch)
+    writer.scalar_summary('val/mAP', mAP, epoch)
 
     return score.avg
 
@@ -309,12 +308,9 @@ def validate_depth(val_loader, model, criterion, eval_score=None, print_freq=10,
     logger.info(' '.join('{:.03f}'.format(i) for i in ious))
     logger.info('mAP: %f', mAP)
     
-    writer.add_scalar('val_depth/loss', loss.data[0], epoch)
-    writer.add_scalar('val_depth/accuracy', score.avg, epoch)
-    writer.add_scalar('val_depth/mAP', mAP, epoch)
-    # writer.add_image('val/gt', target_var, epoch)
-    # writer.add_image('val/pred', output, epoch)
-    # writer.add_image('val/input', input, epoch)
+    writer.scalar_summary('val_depth/loss', loss.data[0], epoch)
+    writer.scalar_summary('val_depth/accuracy', score.avg, epoch)
+    writer.scalar_summary('val_depth/mAP', mAP, epoch)
 
     return score.avg
 
@@ -414,17 +410,17 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
 
         iteration = epoch * len(train_loader) + i
 
-        _, seg_preds = seg_output.data[0].max(0)
-        _, d_cls_preds = d_cls_output.data[0].max(0)
+        _, seg_preds = seg_output.data.max(1)
+        _, d_cls_preds = d_cls_output.data.max(1)
 
-        input_arr = vutils.make_grid(input[0], normalize=True, scale_each=True)
-        seg_gt_arr = vutils.make_grid(seg_target[0], normalize=True, scale_each=True)
-        d_cls_gt_arr = vutils.make_grid(d_cls_target[0], normalize=True, scale_each=True)
-        d_reg_gt_arr = vutils.make_grid(d_reg_target[0], normalize=True, scale_each=True)
+        input_arr = vutils.make_grid(input, normalize=True, scale_each=True)
+        seg_gt_arr = vutils.make_grid(seg_target, normalize=True, scale_each=True)
+        d_cls_gt_arr = vutils.make_grid(d_cls_target, normalize=False, scale_each=True)
+        d_reg_gt_arr = vutils.make_grid(d_reg_target, normalize=False, scale_each=True)
         
         seg_pred_arr = vutils.make_grid(seg_preds, normalize=True, scale_each=True)
-        d_cls_pred_arr = vutils.make_grid(d_cls_preds, normalize=True, scale_each=True)
-        d_reg_pred_arr = vutils.make_grid(d_reg_output.data[0], normalize=True, scale_each=True)
+        d_cls_pred_arr = vutils.make_grid(d_cls_preds, normalize=False, scale_each=True)
+        d_reg_pred_arr = vutils.make_grid(d_reg_output.data, normalize=False, scale_each=True)
         
         if i % print_freq == 0:
             logger.info('Epoch: [{0}][{1}/{2}]\t'
@@ -438,18 +434,15 @@ def train(train_loader, model, criterion_dict, optimizer, epoch,
                 data_time=data_time, loss1=seg_losses, loss2=d_cls_losses,
                 loss3=d_reg_losses, top1=scores))
             
-            writer.add_scalar('train/seg_loss', seg_loss.data[0], iteration)
-            writer.add_scalar('train/d_cls_loss', d_cls_loss.data[0], iteration)
-            writer.add_scalar('train/d_reg_loss', d_reg_loss.data[0], iteration)
-            writer.add_scalar('train/total_loss', total_loss.data[0], iteration)
-            writer.add_scalar('train/seg_accuracy', scores.val, iteration)
-            writer.add_image('train/seg_gt', seg_gt_arr, iteration)
-            writer.add_image('train/seg_pred', seg_pred_arr, iteration)
-            writer.add_image('train/d_cls_gt', d_cls_gt_arr, iteration)
-            writer.add_image('train/d_cls_pred', d_cls_pred_arr, iteration)
-            writer.add_image('train/d_reg_gt', d_reg_gt_arr, iteration)
-            writer.add_image('train/d_reg_pred', d_reg_pred_arr, iteration)
-            # writer.add_image('train/input', input_arr, iteration)
+            writer.scalar_summary('train/seg_loss', seg_loss.data[0], iteration)
+            writer.scalar_summary('train/d_cls_loss', d_cls_loss.data[0], iteration)
+            writer.scalar_summary('train/d_reg_loss', d_reg_loss.data[0], iteration)
+            writer.scalar_summary('train/total_loss', total_loss.data[0], iteration)
+            writer.scalar_summary('train/seg_accuracy', scores.val, iteration)
+            writer.image_summary('train/d_cls_gt', to_np(d_cls_gt_arr)[0:3], iteration)
+            writer.image_summary('train/d_cls_pred', to_np(d_cls_pred_arr)[0:3], iteration)
+            writer.image_summary('train/d_reg_gt', to_np(d_reg_gt_arr)[0:3], iteration)
+            writer.image_summary('train/d_reg_pred', to_np(d_reg_pred_arr)[0:3], iteration)
 
 
 def train_seg(args):
@@ -924,7 +917,7 @@ def main():
     if args.cmd == 'train':
         train_depth_seg(args)
     elif args.cmd == 'test':
-        test_dummy(args)
+        test_seg(args)
     elif args.cmd == 'summarize':
         summarize_seg(args)
 
